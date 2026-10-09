@@ -12,8 +12,9 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Path
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, field_validator
 from typing import Literal
+from datetime import date
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
@@ -137,6 +138,12 @@ class EmployeeIn(BaseModel):
     shift_end: str = Field("18:30", pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
     joined_on: str = Field(pattern=r'^\d{4}-\d{2}-\d{2}$')
 
+    @field_validator('joined_on')
+    @classmethod
+    def check_date(cls, v):
+        date.fromisoformat(v)
+        return v
+
 class PunchInIn(BaseModel):
     emp_code: str
     punched_at: Optional[StrictInt] = Field(None, ge=100000000000, le=4102444800000)
@@ -224,8 +231,8 @@ def punch_in(body: PunchInIn):
 @app.get("/attendance")
 def list_attendance(
     emp_code: Optional[str] = None,
-    date_from: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$'),
-    date_to: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -239,9 +246,9 @@ def list_attendance(
     if date_from or date_to:
         q["date"] = {}
         if date_from:
-            q["date"]["$gte"] = date_from
+            q["date"]["$gte"] = date_from.isoformat()
         if date_to:
-            q["date"]["$lte"] = date_to
+            q["date"]["$lte"] = date_to.isoformat()
     if status:
         q["status"] = status
         
@@ -296,15 +303,16 @@ def punch_out(body: PunchOutIn):
     return attendance_to_dict(updated_record)
 
 @app.patch("/attendance/{emp_code}/{date}", status_code=200)
-def regularize_attendance(emp_code: str, date: str = Path(..., pattern=r'^\d{4}-\d{2}-\d{2}$'), body: RegularizeIn=...):
+def regularize_attendance(emp_code: str, date_obj: date = Path(..., alias="date"), body: RegularizeIn=...):
+    date_str = date_obj.isoformat()
     # 1. Look up employee and record
     emp = db.employees.find_one({"emp_code": emp_code})
     if not emp:
         raise HTTPException(404, "unknown employee")
 
-    record = db.attendance_logs.find_one({"emp_code": emp_code, "date": date})
+    record = db.attendance_logs.find_one({"emp_code": emp_code, "date": date_str})
     if not record:
-        raise HTTPException(404, f"no attendance record for {emp_code} on {date}")
+        raise HTTPException(404, f"no attendance record for {emp_code} on {date_str}")
 
     # 2. Resolve effective values (merge patch fields onto current record)
     new_status   = body.status if body.status is not None else record["status"]
@@ -326,9 +334,9 @@ def regularize_attendance(emp_code: str, date: str = Path(..., pattern=r'^\d{4}-
             raise HTTPException(422, f"{new_status} requires a punch_in")
         # punch_in must belong to the record's attendance date under R1
         computed_date = get_attendance_date(new_punch_in_ts, emp["shift_start"], emp["shift_end"])
-        if computed_date != date:
+        if computed_date != date_str:
             raise HTTPException(422,
-                f"punch_in resolves to attendance date {computed_date}, expected {date}")
+                f"punch_in resolves to attendance date {computed_date}, expected {date_str}")
 
     # 4. punch_out ordering and 24h limit
     if new_punch_in_ts and new_punch_out_ts:
@@ -344,12 +352,12 @@ def regularize_attendance(emp_code: str, date: str = Path(..., pattern=r'^\d{4}-
         new_overtime_minutes = 0
         new_half_day         = False
     elif new_punch_in_ts and new_punch_out_ts:
-        new_late_minutes     = compute_late_minutes(new_punch_in_ts, date, emp["shift_start"])
+        new_late_minutes     = compute_late_minutes(new_punch_in_ts, date_str, emp["shift_start"])
         new_work_hours       = compute_work_hours(new_punch_in_ts, new_punch_out_ts)
-        new_overtime_minutes = compute_overtime(new_punch_out_ts, date, emp["shift_start"], emp["shift_end"])
+        new_overtime_minutes = compute_overtime(new_punch_out_ts, date_str, emp["shift_start"], emp["shift_end"])
         new_half_day         = new_work_hours < 4.50
     else:  # presence, no punch_out yet
-        new_late_minutes     = compute_late_minutes(new_punch_in_ts, date, emp["shift_start"])
+        new_late_minutes     = compute_late_minutes(new_punch_in_ts, date_str, emp["shift_start"])
         new_work_hours       = None
         new_overtime_minutes = 0
         new_half_day         = False
@@ -735,14 +743,16 @@ def late_leaderboard(
 @app.get("/analytics/departments/{department}/trend")
 def department_trend(
     department: str,
-    from_date: str = Query(..., alias="from", pattern=r'^\d{4}-\d{2}-\d{2}$'),
-    to_date: str = Query(..., alias="to", pattern=r'^\d{4}-\d{2}-\d{2}$')
+    from_date: date = Query(..., alias="from"),
+    to_date: date = Query(..., alias="to")
 ):
-    if to_date < from_date:
+    from_date_str = from_date.isoformat()
+    to_date_str = to_date.isoformat()
+    if to_date_str < from_date_str:
         raise HTTPException(422, "to < from")
         
-    f_dt = datetime.fromisoformat(from_date)
-    t_dt = datetime.fromisoformat(to_date)
+    f_dt = datetime.fromisoformat(from_date_str)
+    t_dt = datetime.fromisoformat(to_date_str)
     if (t_dt - f_dt).days > 92:
         raise HTTPException(422, "range exceeds 92 days")
         
@@ -881,11 +891,11 @@ def explain_endpoint(
     month: Optional[str] = Query(None, pattern=r'^\d{4}-(0[1-9]|1[0-2])$'),
     department: Optional[str] = None,
     limit: int = Query(10, ge=1, le=50),
-    date_from: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$'),
-    date_to: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None,
-    from_date: Optional[str] = Query(None, alias="from", pattern=r'^\d{4}-\d{2}-\d{2}$'),
-    to_date: Optional[str] = Query(None, alias="to", pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    from_date: Optional[date] = Query(None, alias="from"),
+    to_date: Optional[date] = Query(None, alias="to"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100)
 ):
@@ -901,8 +911,8 @@ def explain_endpoint(
         if emp_code: q["emp_code"] = emp_code
         if date_from or date_to:
             q["date"] = {}
-            if date_from: q["date"]["$gte"] = date_from
-            if date_to: q["date"]["$lte"] = date_to
+            if date_from: q["date"]["$gte"] = date_from.isoformat()
+            if date_to: q["date"]["$lte"] = date_to.isoformat()
         if status: q["status"] = status
         skip = (page - 1) * page_size
         coll_name = "attendance_logs"
@@ -1137,8 +1147,8 @@ def explain_endpoint(
     elif endpoint_name == "department_trend":
         if not department or not from_date or not to_date:
             raise HTTPException(422, "missing params")
-        f_dt = datetime.fromisoformat(from_date)
-        t_dt = datetime.fromisoformat(to_date)
+        f_dt = datetime.fromisoformat(from_date.isoformat())
+        t_dt = datetime.fromisoformat(to_date.isoformat())
         pipeline = [
             {"$match": {"department": department}},
             {"$limit": 1},
