@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from decimal import Decimal, ROUND_HALF_UP
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Path
 from pydantic import BaseModel, Field, StrictInt
 from typing import Literal
 from pymongo import MongoClient
@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI):
     db.employees.create_index("emp_code", unique=True)
     db.employees.create_index([("department", 1), ("emp_code", 1)])
     db.employees.create_index([("department", 1), ("joined_on", 1)])
+    db.employees.create_index("joined_on")
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
     db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1), ("status", 1)])
@@ -223,9 +224,9 @@ def punch_in(body: PunchInIn):
 @app.get("/attendance")
 def list_attendance(
     emp_code: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    status: Optional[str] = None,
+    date_from: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    date_to: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
@@ -295,7 +296,7 @@ def punch_out(body: PunchOutIn):
     return attendance_to_dict(updated_record)
 
 @app.patch("/attendance/{emp_code}/{date}", status_code=200)
-def regularize_attendance(emp_code: str, date: str, body: RegularizeIn):
+def regularize_attendance(emp_code: str, date: str = Path(..., pattern=r'^\d{4}-\d{2}-\d{2}$'), body: RegularizeIn=...):
     # 1. Look up employee and record
     emp = db.employees.find_one({"emp_code": emp_code})
     if not emp:
@@ -880,9 +881,9 @@ def explain_endpoint(
     month: Optional[str] = Query(None, pattern=r'^\d{4}-(0[1-9]|1[0-2])$'),
     department: Optional[str] = None,
     limit: int = Query(10, ge=1, le=50),
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    status: Optional[str] = None,
+    date_from: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    date_to: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None,
     from_date: Optional[str] = Query(None, alias="from", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     to_date: Optional[str] = Query(None, alias="to", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     page: int = Query(1, ge=1),

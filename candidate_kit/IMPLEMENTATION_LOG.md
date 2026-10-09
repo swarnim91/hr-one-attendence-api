@@ -12,3 +12,7 @@
 * Implemented `_compute_working_days` as a lightweight python function for precise weekday tracking relative to the `joined_on` boundaries for monthly metrics.
 * Used MongoDB `$densify` for gap filling in the trend endpoint exactly as specified.
 * Leveraged `$setWindowFields` heavily for ranking and moving average.
+
+## Final Audit Fixes
+* Added `joined_on` index to prevent `COLLSCAN` during department summary queries when no department is specified.
+* Fixed query validation in `list_attendance` and `explain_endpoint` to enforce strict formatting and enum boundaries per OpenAPI spec.
